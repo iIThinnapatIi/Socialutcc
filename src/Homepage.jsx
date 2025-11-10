@@ -1,13 +1,12 @@
 // src/Homepage.jsx
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import "./Homepage.css";
 import { Link } from "react-router-dom";
 
-// API และ hook
-import { getTweetAnalysis } from "./services/api";
-import { useFetch } from "./hooks/useFetch";
+// services
+import { getSentimentSummary, getMentionsTrend } from "./services/api";
 
-// components เดิม
+// components
 import FiltersBar from "./components/FiltersBar";
 import SentimentOverview from "./components/SentimentOverview";
 import MentionsTrend from "./components/MentionsTrend";
@@ -15,49 +14,16 @@ import MetricsRow from "./components/MetricsRow";
 import MentionsTable from "./components/MentionsTable";
 import { downloadCSV } from "./utils/csv";
 
-/* ===== helper จาก Sentiment.jsx ===== */
-const normSent = (s = "") => {
-    const x = s.toLowerCase();
-    if (x === "pos" || x === "positive") return "positive";
-    if (x === "neg" || x === "negative") return "negative";
-    return "neutral";
-};
-const pickDate = (r) =>
-    (r.analyzedAt || r.createdAt || r.crawlTime || "").toString().slice(0, 10);
-const parseTopics = (r) => {
-    if (Array.isArray(r.topics) && r.topics.length) return r.topics;
-    const tj = r.topicsJson;
-    if (!tj) return [];
-    const str = String(tj).trim();
-    if (str.startsWith("[") || str.startsWith("{")) {
-        try {
-            const arr = JSON.parse(str);
-            if (Array.isArray(arr)) return arr.map(String);
-        } catch (_) { }
-    }
-    return str.split(",").map((s) => s.trim()).filter(Boolean);
-};
-function SentimentBadge({ value }) {
-    const v = (value || "").toLowerCase();
-    const cls =
-        v === "positive"
-            ? "pill pill-pos"
-            : v === "negative"
-                ? "pill pill-neg"
-                : "pill pill-neu";
-    return <span className={cls}>{v || "-"}</span>;
-}
-
 function Homepage() {
-    // ---------- state ----------
-    const [page, setPage] = useState(1);
-    const pageSize = 10;
+    // ---------- filter states ----------
     const [q, setQ] = useState("");
     const [faculty, setFaculty] = useState("ทั้งหมด");
     const [sent, setSent] = useState("ทั้งหมด");
-    const [from, setFrom] = useState("");
+    const [from, setFrom] = useState(""); // YYYY-MM-DD (หรือมีเวลาได้)
     const [to, setTo] = useState("");
+    const [page, setPage] = useState(1);
 
+    // faculties ที่โชว์ใน dropdown (ปรับเพิ่ม/ลดได้)
     const faculties = useMemo(
         () => [
             "ทั้งหมด",
@@ -70,91 +36,82 @@ function Homepage() {
         []
     );
 
-    const { data, loading, err } = useFetch(() => getTweetAnalysis(), []);
-    const rows = data || [];
+    // ---------- load sentiment summary ----------
+    const [sumData, setSumData] = useState([]);
+    const [sumLoading, setSumLoading] = useState(true);
+    const [sumErr, setSumErr] = useState(null);
 
-    // ---------- filter ----------
-    const filtered = useMemo(() => {
-        const qq = q.trim().toLowerCase();
-        const fromD = from ? new Date(from) : null;
-        const toD = to ? new Date(to) : null;
+    useEffect(() => {
+        let cancel = false;
+        (async () => {
+            try {
+                setSumLoading(true);
+                setSumErr(null);
+                const rows = await getSentimentSummary(); // -> [{sentiment,total}]
+                const toName = (s) => {
+                    const x = (s || "").toLowerCase();
+                    if (x === "positive" || x === "pos") return "Positive";
+                    if (x === "negative" || x === "neg") return "Negative";
+                    return "Neutral";
+                };
+                const mapped = (rows || []).map((r) => ({
+                    name: toName(r.sentiment),
+                    value: Number(r.total || 0),
+                }));
+                // ให้เรียงเป็น Pos/Neu/Neg เพื่อแมตช์สีใน component
+                const order = { Positive: 0, Neutral: 1, Negative: 2 };
+                mapped.sort((a, b) => order[a.name] - order[b.name]);
+                if (!cancel) setSumData(mapped);
+            } catch (e) {
+                if (!cancel) setSumErr(e?.message || "โหลดสรุปอารมณ์ไม่สำเร็จ");
+            } finally {
+                if (!cancel) setSumLoading(false);
+            }
+        })();
+        return () => { cancel = true; };
+    }, []);
 
-        return rows.filter((r) => {
-            const fac = (r.faculty || "").trim();
-            const s = normSent(r.sentimentLabel);
-            const dayStr = pickDate(r);
-            const day = dayStr ? new Date(dayStr) : null;
+    // KPI รวม (ดึงจาก sumData เพื่อให้ตรงกับวงกลม)
+    const total = useMemo(() => sumData.reduce((acc, r) => acc + (r.value || 0), 0), [sumData]);
+    const pos = useMemo(() => sumData.find((x) => x.name === "Positive")?.value || 0, [sumData]);
+    const neu = useMemo(() => sumData.find((x) => x.name === "Neutral")?.value || 0, [sumData]);
+    const neg = useMemo(() => sumData.find((x) => x.name === "Negative")?.value || 0, [sumData]);
 
-            if (faculty !== "ทั้งหมด" && fac !== faculty) return false;
-            if (sent !== "ทั้งหมด" && s !== sent) return false;
-            if (fromD && day && day < fromD) return false;
-            if (toD && day && day > toD) return false;
+    // ---------- load trend ----------
+    const [trendData, setTrendData] = useState([]);
+    const [trendLoading, setTrendLoading] = useState(true);
+    const [trendErr, setTrendErr] = useState(null);
 
-            if (!qq) return true;
-            const topics = parseTopics(r).join(" ");
-            const hay = `${topics} ${r.faculty || ""} ${r.sentimentLabel || ""} ${r.tweetId || ""
-                } ${r.text || ""}`;
-            return hay.toLowerCase().includes(qq);
-        });
-    }, [rows, q, faculty, sent, from, to]);
+    useEffect(() => {
+        let cancel = false;
+        (async () => {
+            try {
+                setTrendLoading(true);
+                setTrendErr(null);
+                const rows = await getMentionsTrend(); // -> [{ymd,count}]
+                const mapped = (rows || []).map((r) => ({
+                    date: r.ymd,            // 'YYYY-MM-DD'
+                    count: Number(r.count || 0),
+                }));
+                if (!cancel) setTrendData(mapped);
+            } catch (e) {
+                if (!cancel) setTrendErr(e?.message || "โหลดเทรนด์ไม่สำเร็จ");
+            } finally {
+                if (!cancel) setTrendLoading(false);
+            }
+        })();
+        return () => { cancel = true; };
+    }, []);
 
-    // ---------- summary ----------
-    const total = filtered.length;
-    const { pos, neu, neg } = useMemo(() => {
-        let p = 0, n = 0, g = 0;
-        for (const r of filtered) {
-            const s = normSent(r.sentimentLabel);
-            if (s === "positive") p++;
-            else if (s === "negative") g++;
-            else n++;
-        }
-        return { pos: p, neu: n, neg: g };
-    }, [filtered]);
-
-    const sentimentData = useMemo(
-        () => [
-            { name: "Positive", value: pos },
-            { name: "Neutral", value: neu },
-            { name: "Negative", value: neg },
-        ],
-        [pos, neu, neg]
-    );
-
-    // ---------- Sentiment รายละเอียด (มาจาก Sentiment.jsx) ----------
-    const mappedSentiment = useMemo(() =>
-        filtered.map((r, i) => {
-            const topics = parseTopics(r);
-            return {
-                id: r.id ?? i,
-                tweetId: r.tweetId || "",
-                faculty: r.faculty || "UNKNOWN",
-                sentiment: normSent(r.sentimentLabel),
-                date: pickDate(r),
-                topics,
-                source: r.source || "X",
-                nsfw: r.nsfw ? "Yes" : "No",
-                toxic: r.toxic ? "Yes" : "No",
-                url: r.tweetId
-                    ? `https://x.com/i/web/status/${r.tweetId}`
-                    : "#",
-            };
-        }), [filtered]
-    );
-
+    // ---------- export CSV (จาก KPI summary) ----------
     const exportCSV = () => {
-        const flat = mappedSentiment.map((m) => ({
-            id: m.id,
-            tweetId: m.tweetId,
-            faculty: m.faculty,
-            sentiment: m.sentiment,
-            analyzedAt: m.date,
-            topics: m.topics.join(" | "),
-            source: m.source,
-            nsfw: m.nsfw,
-            toxic: m.toxic,
-            url: m.url,
-        }));
-        downloadCSV(flat, "sentiment_report.csv");
+        const flat = [
+            { sentiment: "Positive", total: pos },
+            { sentiment: "Neutral", total: neu },
+            { sentiment: "Negative", total: neg },
+            { sentiment: "All", total },
+        ];
+        downloadCSV(flat, "sentiment_summary.csv");
     };
 
     const resetFilters = () => {
@@ -165,19 +122,6 @@ function Homepage() {
         setTo("");
         setPage(1);
     };
-
-    // ---------- trend ----------
-    const trend = useMemo(() => {
-        const byDay = new Map();
-        for (const r of filtered) {
-            const d = pickDate(r);
-            if (!d) continue;
-            byDay.set(d, (byDay.get(d) || 0) + 1);
-        }
-        return Array.from(byDay.entries())
-            .sort((a, b) => a[0].localeCompare(b[0]))
-            .map(([date, count]) => ({ date, count }));
-    }, [filtered]);
 
     return (
         <div className="homepage-container">
@@ -202,7 +146,7 @@ function Homepage() {
                         <i className="fas fa-comment-dots"></i>
                         <span>Mentions</span>
                     </Link>
-                     
+
                     <Link to="/trends" className="nav-item">
                         <i className="fas fa-stream"></i>
                         <span>Trends</span>
@@ -238,7 +182,7 @@ function Homepage() {
                     </div>
                 </header>
 
-                {/* Filter */}
+                {/* Filters */}
                 <div className="filters-sticky">
                     <FiltersBar
                         q={q}
@@ -272,53 +216,23 @@ function Homepage() {
                     </div>
                 </section>
 
-                {/* Chart */}
+                {/* Charts */}
                 <main className="widgets-grid">
-                    <SentimentOverview data={sentimentData} loading={loading} error={err} />
-                    <MentionsTrend data={trend} loading={loading} error={err} />
-                    <MetricsRow total={total} loading={loading} />
+                    <SentimentOverview data={sumData} loading={sumLoading} error={sumErr} />
+                    <MentionsTrend data={trendData} loading={trendLoading} error={trendErr} />
+                    <MetricsRow total={total} loading={sumLoading || trendLoading} />
                 </main>
 
-                {/* ===== ส่วนของหน้า Sentiment เพิ่มเข้ามา ===== */}
-                <section className="card">
-                    <h3 className="widget-title">รายการโพสต์ตาม Sentiment ({total})</h3>
-                    {loading ? (
-                        <div className="placeholder">กำลังโหลด...</div>
-                    ) : (
-                        <div className="table">
-                            <div className="t-head">
-                                <div>ID</div>
-                                <div>Topics</div>
-                                <div>Faculty</div>
-                                <div>Sentiment</div>
-                                <div>Source</div>
-                                <div>NSFW</div>
-                                <div>Toxic</div>
-                                <div>Analyzed At</div>
-                                <div>Link</div>
-                            </div>
-                            {mappedSentiment.map((m) => (
-                                <div className="t-row" key={m.id}>
-                                    <div>{m.id}</div>
-                                    <div className="topics" title={m.topics.join(", ")}>
-                                        {m.topics.length ? m.topics.join(", ") : "-"}
-                                    </div>
-                                    <div>{m.faculty}</div>
-                                    <div><SentimentBadge value={m.sentiment} /></div>
-                                    <div>{m.source}</div>
-                                    <div className={m.nsfw === "Yes" ? "flag bad" : "flag ok"}>{m.nsfw}</div>
-                                    <div className={m.toxic === "Yes" ? "flag bad" : "flag ok"}>{m.toxic}</div>
-                                    <div>{m.date || "-"}</div>
-                                    <div>
-                                        {m.url && m.url !== "#" ? (
-                                            <a className="link" href={m.url} target="_blank" rel="noreferrer">เปิดลิงก์</a>
-                                        ) : "-"}
-                                    </div>
-                                </div>
-                            ))}
-                        </div>
-                    )}
-                </section>
+                {/* ตารางโพสต์: ให้ดึงตรงจาก backend เอง (เราทำไว้ใน MentionsTable แล้ว) */}
+                <MentionsTable
+                    q={q}
+                    faculty={faculty}
+                    sent={sent}
+                    from={from}
+                    to={to}
+                    page={page}
+                    onPageChange={setPage}
+                />
             </div>
         </div>
     );

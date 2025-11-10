@@ -1,49 +1,118 @@
-// ✅ src/components/MentionsTable.jsx
-import React from "react";
-import Pager from "./Pager";
-import ExportButtons from "./ExportButtons";
+// src/components/MentionsTable.jsx
+import React, { useEffect, useState } from "react";
+import { getMentions } from "../services/api";
 
-export default function MentionsTable({
-                                          items, error, loading,
-                                          page, maxPage, setPage,
-                                          onExportAll
-                                      }) {
+function MentionsTable({
+                           q = "",
+                           faculty = "ทั้งหมด",
+                           sent = "ทั้งหมด",
+                           from = "",
+                           to = "",
+                           page = 1,
+                           onPageChange,
+                       }) {
+    const [rows, setRows] = useState([]);
+    const [loading, setLoading] = useState(true);
+    const [err, setErr] = useState(null);
+    const pageSize = 10;
+
+    useEffect(() => {
+        let cancel = false;
+        (async () => {
+            try {
+                setLoading(true);
+                setErr(null);
+                const data = await getMentions({
+                    q,
+                    faculty,
+                    sent,
+                    from,
+                    to,
+                    page,
+                    size: pageSize,
+                });
+
+                // ป้องกัน backend คืน null/undefined
+                const safe = (data || []).map((it) => ({
+                    id: it.id,
+                    title: it.title ?? "-",              // <- มาจาก summary ฝั่ง backend
+                    faculty: it.faculty ?? "unknown",    // <- มาจาก faculty_code
+                    sentiment: it.sentiment ?? "unknown",
+                    created_at: it.created_at ?? "",
+                    source: it.source ?? "-",
+                }));
+
+                if (!cancel) setRows(safe);
+            } catch (e) {
+                if (!cancel) setErr(e?.message || "โหลดรายการไม่สำเร็จ");
+            } finally {
+                if (!cancel) setLoading(false);
+            }
+        })();
+
+        return () => { cancel = true; };
+    }, [q, faculty, sent, from, to, page]);
+
+    const next = () => onPageChange?.(page + 1);
+    const prev = () => onPageChange?.(Math.max(1, page - 1));
+
     return (
-        <div className="widget-card" style={{ gridColumn:"span 2" }}>
-            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-                <h3 className="widget-title">รายการโพสต์ทั้งหมด</h3>
-                <ExportButtons currentRows={items} onExportAll={onExportAll} />
+        <section className="card">
+            <div className="card-header">
+                <div className="card-title">รายการโพสต์ทั้งหมด</div>
+                <div className="card-actions">
+                    <button className="btn ghost" onClick={prev} disabled={page <= 1}>
+                        ก่อนหน้า
+                    </button>
+                    <span style={{ padding: "0 8px" }}>หน้า {page}</span>
+                    <button
+                        className="btn ghost"
+                        onClick={next}
+                        disabled={rows.length < pageSize}
+                    >
+                        ถัดไป
+                    </button>
+                </div>
             </div>
 
-            {error && <div style={{ color:"#c62828", marginBottom:10 }}>โหลดข้อมูลไม่สำเร็จ: {String(error)}</div>}
-
             {loading ? (
-                <div className="chart-placeholder">กำลังโหลดข้อมูล…</div>
+                <div className="card-body">กำลังโหลด...</div>
+            ) : err ? (
+                <div className="card-body error">เกิดข้อผิดพลาด: {err}</div>
+            ) : rows.length === 0 ? (
+                <div className="card-body">ไม่พบข้อมูล</div>
             ) : (
-                <>
-                    <div className="table">
-                        <div className="t-head">
-                            <div>Title</div><div>Faculty</div><div>Sentiment</div><div>Date</div><div>Source</div>
-                        </div>
-
-                        {items.map(m => (
-                            <div className="t-row" key={m.id}>
-                                <div className="t-title" title={m.title}>{m.title}</div>
-                                <div>{m.faculty}</div>
-                                <div>{m.sentiment}</div>
-                                <div>{m.date}</div>
-                                <div><a href={m.url} target="_blank" rel="noreferrer">เปิดลิงก์</a></div>
-                            </div>
+                <div className="table-wrap">
+                    <table className="table">
+                        <thead>
+                        <tr>
+                            <th style={{ width: 56 }}>#</th>
+                            <th>Title</th>
+                            <th>Faculty</th>
+                            <th>Sentiment</th>
+                            <th>Date</th>
+                            <th>Source</th>
+                        </tr>
+                        </thead>
+                        <tbody>
+                        {rows.map((item, idx) => (
+                            <tr key={item.id ?? `${page}-${idx}`}>
+                                <td>{(page - 1) * pageSize + idx + 1}</td>
+                                <td>{item.title}</td>
+                                <td>{item.faculty}</td>
+                                <td className={`tag tag-${(item.sentiment || "").toLowerCase()}`}>
+                                    {item.sentiment}
+                                </td>
+                                <td>{item.created_at}</td>
+                                <td>{item.source}</td>
+                            </tr>
                         ))}
-
-                        {items.length === 0 && (
-                            <div style={{ color:"#777", padding:"10px 0" }}>ไม่พบข้อมูล</div>
-                        )}
-                    </div>
-
-                    <Pager page={page} maxPage={maxPage} setPage={setPage} />
-                </>
+                        </tbody>
+                    </table>
+                </div>
             )}
-        </div>
+        </section>
     );
 }
+
+export default MentionsTable;
